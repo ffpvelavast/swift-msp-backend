@@ -1,0 +1,281 @@
+# REX Backend — GitLab CI/CD
+# Copy this file to the backend repo root as .gitlab-ci.yml
+#
+# Required GitLab CI/CD variables (Settings → CI/CD → Variables):
+#   DEV_SERVER_IP       — public IP of the dev app server
+#   PROD_SERVER_IP      — public IP of the prod app server
+#   DEPLOY_SSH_KEY      — base64-encoded private SSH key for dev/prod server
+#   INT_SERVER_IP       — public IP of the internal server
+#   DEPLOY_SSH_KEY_INT  — base64-encoded private SSH key for internal server
+#   APP_CONFIG_DEV      — .env file for dev server (File type variable)
+#   APP_CONFIG_INT      — .env file for internal server (File type variable)
+
+include:
+  - template: Security/SAST.gitlab-ci.yml
+  - template: Security/Secret-Detection.gitlab-ci.yml
+  - template: Security/Dependency-Scanning.gitlab-ci.yml
+
+stages:
+  - build
+  - test
+  - deploy
+
+# ── Build (Maven) ──────────────────────────────────────────────────────────────
+build:
+  stage: build
+  image: maven:3.9-eclipse-temurin-21
+  script:
+    - mvn clean package -DskipTests --batch-mode --no-transfer-progress
+  artifacts:
+    paths:
+      - target/rex-backend.jar              # requires pom.xml <build><finalName>rex-backend</finalName></build>
+      - rex-backend-flyway/                 # Flyway migrations — deployed alongside JAR
+      - src/main/resources/application.yml    # deployed to server working directory
+    expire_in: 1 hour
+  cache:
+    key: "maven-$CI_COMMIT_REF_SLUG"
+    paths:
+      - .m2/repository/
+  only:
+    - pre-dev
+    - dev
+    - uat
+    - main
+
+# ── Test ───────────────────────────────────────────────────────────────────────
+test:
+  stage: test
+  image: maven:3.9-eclipse-temurin-21
+  services:
+    - name: postgres:16
+      alias: postgres
+      variables:
+        POSTGRES_DB: rexbase
+        POSTGRES_USER: rexapp
+        POSTGRES_PASSWORD: test
+  variables:
+    SPRING_DATASOURCE_URL: "jdbc:postgresql://postgres:5432/rexbase"
+    POSTGRES_USER: rexapp
+    POSTGRES_PASSWORD: test
+    JWT_SECRETKEY: "ci-test-secret-key-not-used-in-production-32chars"
+    SPRING_PROFILES_ACTIVE: test
+  script:
+    - mvn test --batch-mode --no-transfer-progress
+  artifacts:
+    when: on_failure
+    paths:
+      - target/surefire-reports/
+    expire_in: 3 days
+  cache:
+    key: maven-$CI_COMMIT_REF_SLUG
+    paths:
+      - .m2/repository/
+  only:
+    - pre-dev
+    - dev
+    - uat
+    - main
+  needs:
+    - build
+
+# ── Deploy to Dev ──────────────────────────────────────────────────────────────
+deploy:dev:
+  stage: deploy
+  image: alpine:latest
+  environment:
+    name: dev
+    url: https://api.dev.rex.tax
+  before_script:
+    - apk add --no-cache openssh-client rsync
+    - eval $(ssh-agent -s)
+    - echo "$DEPLOY_SSH_KEY" | base64 -d > /tmp/deploy_key && chmod 400 /tmp/deploy_key
+    - ssh-add /tmp/deploy_key
+    - mkdir -p ~/.ssh
+    - ssh-keyscan "$DEV_SERVER_IP" >> ~/.ssh/known_hosts
+  script:
+    # Backup current JAR for rollback
+    - ssh rexapp@"$DEV_SERVER_IP" "cp /opt/rex/backend/rex-backend.jar /opt/rex/backend/rex-backend-prev.jar 2>/dev/null || true"
+    # Deploy new JAR, Flyway migrations, and application config
+    - scp target/rex-backend.jar rexapp@"$DEV_SERVER_IP":/opt/rex/backend/rex-backend.jar
+    - scp src/main/resources/application.yml rexapp@"$DEV_SERVER_IP":/opt/rex/backend/application.yml
+    - rsync -avz --delete rex-backend-flyway/ rexapp@"$DEV_SERVER_IP":/opt/rex/backend/rex-backend-flyway/
+    - scp "$APP_CONFIG_DEV" rexapp@"$DEV_SERVER_IP":/opt/rex/backend/.env
+    - ssh rexapp@"$DEV_SERVER_IP" "sudo /usr/bin/systemctl restart rex-backend"
+    - |
+      for i in $(seq 1 24); do
+        sleep 10
+        if ssh rexapp@"$DEV_SERVER_IP" "curl -sf http://localhost:8080/actuator/health | grep -q UP"; then
+          echo "Backend is healthy"; exit 0
+        fi
+        echo "Waiting for backend... ($((i*10))s)"
+      done
+      echo "Health check failed — fetching application logs"
+      mkdir -p deploy-logs
+      ssh rexapp@"$DEV_SERVER_IP" "journalctl -u rex-backend -n 300 --no-pager" > deploy-logs/app-startup.log 2>&1 || true
+      echo "Rolling back to previous JAR"
+      ssh rexapp@"$DEV_SERVER_IP" "cp /opt/rex/backend/rex-backend-prev.jar /opt/rex/backend/rex-backend.jar && sudo /usr/bin/systemctl restart rex-backend"
+      exit 1
+  artifacts:
+    when: on_failure
+    paths:
+      - deploy-logs/
+    expire_in: 3 days
+  only:
+    - uat
+  needs:
+    - build
+    - test
+
+# ── Manual rollback for Dev ────────────────────────────────────────────────────
+rollback:dev:
+  stage: deploy
+  image: alpine:latest
+  environment:
+    name: dev
+    url: https://api.dev.rex.tax
+  before_script:
+    - apk add --no-cache openssh-client
+    - eval $(ssh-agent -s)
+    - echo "$DEPLOY_SSH_KEY" | base64 -d > /tmp/deploy_key && chmod 400 /tmp/deploy_key
+    - ssh-add /tmp/deploy_key
+    - mkdir -p ~/.ssh
+    - ssh-keyscan "$DEV_SERVER_IP" >> ~/.ssh/known_hosts
+  script:
+    - ssh rexapp@"$DEV_SERVER_IP" "test -f /opt/rex/backend/rex-backend-prev.jar || (echo 'No previous JAR found'; exit 1)"
+    - ssh rexapp@"$DEV_SERVER_IP" "cp /opt/rex/backend/rex-backend-prev.jar /opt/rex/backend/rex-backend.jar && sudo /usr/bin/systemctl restart rex-backend"
+    - echo "Rolled back — verifying..."
+    - |
+      for i in $(seq 1 12); do
+        sleep 10
+        if ssh rexapp@"$DEV_SERVER_IP" "curl -sf http://localhost:8080/actuator/health | grep -q UP"; then
+          echo "Rollback successful"; exit 0
+        fi
+        echo "Waiting... ($((i*10))s)"
+      done
+      echo "Rollback health check failed"; exit 1
+  only:
+    - uat
+  when: manual
+  needs: []
+
+# ── Deploy to Prod ─────────────────────────────────────────────────────────────
+deploy:prod:
+  stage: deploy
+  image: alpine:latest
+  environment:
+    name: prod
+    url: https://api.rex.tax
+  before_script:
+    - apk add --no-cache openssh-client rsync
+    - eval $(ssh-agent -s)
+    - echo "$DEPLOY_SSH_KEY" | base64 -d > /tmp/deploy_key && chmod 400 /tmp/deploy_key
+    - ssh-add /tmp/deploy_key
+    - mkdir -p ~/.ssh
+    - ssh-keyscan "$PROD_SERVER_IP" >> ~/.ssh/known_hosts
+  script:
+    - scp target/rex-backend.jar rexapp@"$PROD_SERVER_IP":/opt/rex/backend/rex-backend.jar
+    - rsync -avz rex-backend-flyway/ rexapp@"$PROD_SERVER_IP":/opt/rex/backend/rex-backend-flyway/
+    - ssh rexapp@"$PROD_SERVER_IP" "sudo /usr/bin/systemctl restart rex-backend"
+    - |
+      for i in $(seq 1 24); do
+        sleep 10
+        if ssh rexapp@"$PROD_SERVER_IP" "curl -sf http://localhost:8080/actuator/health | grep -q UP"; then
+          echo "Backend is healthy"; exit 0
+        fi
+        echo "Waiting for backend... ($((i*10))s)"
+      done
+      echo "Backend health check failed after 240s — fetching application logs"
+      mkdir -p deploy-logs
+      ssh rexapp@"$PROD_SERVER_IP" "journalctl -u rex-backend -n 300 --no-pager" > deploy-logs/app-startup.log 2>&1 || true
+      exit 1
+  artifacts:
+    when: on_failure
+    paths:
+      - deploy-logs/
+    expire_in: 3 days
+  only:
+    - main
+  when: manual          # requires explicit approval for prod deployments
+  needs:
+    - build
+    - test
+
+# ── Deploy to Internal Server ──────────────────────────────────────────────────
+deploy:internal:
+  stage: deploy
+  image: alpine:latest
+  environment:
+    name: internal
+    url: https://internal.rex.tax
+  before_script:
+    - apk add --no-cache openssh-client rsync
+    - eval $(ssh-agent -s)
+    - echo "$DEPLOY_SSH_KEY_INT" | base64 -d > /tmp/deploy_key && chmod 400 /tmp/deploy_key
+    - ssh-add /tmp/deploy_key
+    - mkdir -p ~/.ssh
+    - ssh-keyscan "$INT_SERVER_IP" >> ~/.ssh/known_hosts
+  script:
+    # Backup current JAR for rollback
+    - ssh root@"$INT_SERVER_IP" "cp /var/www/rex/backend/target/rex-backend.jar /var/www/rex/backend/target/rex-backend-prev.jar 2>/dev/null || true"
+    # Deploy new JAR, Flyway migrations, and application config
+    - scp target/rex-backend.jar root@"$INT_SERVER_IP":/var/www/rex/backend/target/rex-backend.jar
+    - scp src/main/resources/application.yml root@"$INT_SERVER_IP":/var/www/rex/backend/target/application.yml
+    - rsync -avz --delete rex-backend-flyway/ root@"$INT_SERVER_IP":/var/www/rex/backend/target/rex-backend-flyway/
+    - scp "$APP_CONFIG_INT" root@"$INT_SERVER_IP":/var/www/rex/backend/target/.env
+    - ssh root@"$INT_SERVER_IP" "systemctl restart test-rex"
+    - |
+      for i in $(seq 1 24); do
+        sleep 10
+        if ssh root@"$INT_SERVER_IP" "curl -sf http://localhost:8090/actuator/health | grep -q UP"; then
+          echo "Backend is healthy"; exit 0
+        fi
+        echo "Waiting for backend... ($((i*10))s)"
+      done
+      echo "Health check failed — fetching application logs"
+      mkdir -p deploy-logs
+      ssh root@"$INT_SERVER_IP" "journalctl -u test-rex -n 300 --no-pager" > deploy-logs/app-startup.log 2>&1 || true
+      echo "Rolling back to previous JAR"
+      ssh root@"$INT_SERVER_IP" "cp /var/www/rex/backend/target/rex-backend-prev.jar /var/www/rex/backend/target/rex-backend.jar && systemctl restart test-rex"
+      exit 1
+  artifacts:
+    when: on_failure
+    paths:
+      - deploy-logs/
+    expire_in: 3 days
+  only:
+    - dev
+  needs:
+    - build
+    - test
+
+# ── Manual rollback for Internal Server ───────────────────────────────────────
+rollback:internal:
+  stage: deploy
+  image: alpine:latest
+  environment:
+    name: internal
+    url: https://internal.rex.tax
+  before_script:
+    - apk add --no-cache openssh-client
+    - eval $(ssh-agent -s)
+    - echo "$DEPLOY_SSH_KEY_INT" | base64 -d > /tmp/deploy_key && chmod 400 /tmp/deploy_key
+    - ssh-add /tmp/deploy_key
+    - mkdir -p ~/.ssh
+    - ssh-keyscan "$INT_SERVER_IP" >> ~/.ssh/known_hosts
+  script:
+    - ssh root@"$INT_SERVER_IP" "test -f /var/www/rex/backend/target/rex-backend-prev.jar || (echo 'No previous JAR found'; exit 1)"
+    - ssh root@"$INT_SERVER_IP" "cp /var/www/rex/backend/target/rex-backend-prev.jar /var/www/rex/backend/target/rex-backend.jar && systemctl restart test-rex"
+    - echo "Rolled back — verifying..."
+    - |
+      for i in $(seq 1 12); do
+        sleep 10
+        if ssh root@"$INT_SERVER_IP" "curl -sf http://localhost:8090/actuator/health | grep -q UP"; then
+          echo "Rollback successful"; exit 0
+        fi
+        echo "Waiting... ($((i*10))s)"
+      done
+      echo "Rollback health check failed"; exit 1
+  only:
+    - dev
+  when: manual
+  needs: []

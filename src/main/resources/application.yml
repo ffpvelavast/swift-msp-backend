@@ -1,0 +1,136 @@
+server:
+  http2:
+    enabled: true
+  forward-headers-strategy: framework
+
+spring:
+  servlet:
+    multipart:
+      max-file-size: 15MB
+      max-request-size: 15MB
+  security:
+    user:
+      name: ${SPRING_ADMIN_USER:admin}
+      password: ${SPRING_ADMIN_PASSWORD:secret123}
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5600/app}
+    username: ${POSTGRES_USER:postgres}
+    password: ${POSTGRES_PASSWORD:postgres}
+    hikari:
+      pool-name: RexHikariPool
+  sql:
+    init:
+      mode: never
+  flyway:
+    enabled: true
+    locations: filesystem:rex-backend-flyway/rex-backend-flyway/migrations
+    baseline-on-migrate: true
+    baseline-version: 1
+    validate-on-migrate: false
+    out-of-order: false
+  jpa:
+    hibernate:
+      ddl-auto: none
+    defer-datasource-initialization: false
+    properties:
+      hibernate.jdbc.batch_size: 50
+      hibernate.order_inserts: true
+      hibernate.order_updates: true
+      hibernate.generate_statistics: false
+      hibernate.jdbc.time_zone: UTC
+      hibernate.hbm2ddl.create_namespaces: true
+    open-in-view: false
+  jackson:
+    time-zone: UTC
+    serialization:
+      write-dates-as-timestamps: false
+  mail:
+    host: ${SMTP_HOST:smtp.gmail.com}
+    port: ${SMTP_PORT:587}
+    username: ${SMTP_USERNAME:v6503298@gmail.com}
+    password: ${SMTP_PASSWORD:igja nqmf kqyv mttz}
+    properties:
+      mail:
+        smtp:
+          auth: true
+          starttls:
+            enable: true
+
+springdoc:
+  show-actuator: true
+
+management:
+  endpoint:
+    health:
+      show-details: ALWAYS
+      probes:
+        enabled: true
+  endpoints:
+    web:
+      exposure:
+        include: "*"
+
+logging:
+  level:
+    root: INFO
+    org.springframework: INFO
+    com.rex.commodis: INFO
+
+jwt:
+  secretKey: ${JWT_SECRET_KEY:secret}
+  issuer: www.velavast.com
+  expirationMinute: 10
+
+swagger:
+  contact-name: Commodis GmbH
+  contact-mail: info@commodis.de
+  contact-url: https://commodis.de/
+  app-name: REX API
+  app-description: "Multi-tenant invoice, receipt, and expense management platform. Provides endpoints for invoice workflow, beneficiary management, receipts, and platform configuration."
+  app-version: 3.4.0
+  app-license-url: https://www.apache.org/licenses/LICENSE-2.0.html
+  app-license: Apache 2.0
+
+app:
+  image:
+    max-size: 5242880
+    max-width: 1024
+    max-height: 1024
+    quality: 0.8
+    storage-path: uploads
+  notifications:
+    admin-email: ${ADMIN_EMAIL:v6503298@gmail.com}
+
+cors:
+  allowed-origins: "http://localhost:*,https://dev.rex.tax,https://internal.rex.tax"
+  allowed-methods: "GET,POST,PUT,DELETE,PATCH,OPTIONS"
+  allowed-headers: "*"
+  allow-credentials: true
+
+dvelop:
+  api:
+    base-url: ${DVELOP_API_BASE_URL:https://gtdtest.d-velop.cloud}
+    transfers-path: ${DVELOP_API_TRANSFERS_PATH:/smartinvoice/api/v1/transfers}
+    integration-key: ${DVELOP_API_INTEGRATION_KEY:fake-integration-key}
+  invoice:
+    source-system: SERVER
+
+invoice-sync:
+  enabled: ${INVOICE_SYNC_ENABLED:false}
+
+hetzner:
+  s3:
+    endpoint: https://nbg1.your-objectstorage.com
+    access-key: ${HETZNER_S3_ACCESS_KEY:CZ62FXOLBM19SJS8JAOA}
+    secret-key: ${HETZNER_S3_SECRET_KEY:nh8jSb73LGLYfADmLAKyPCbByGn35VODsrTrCXiN}
+    region: nbg1
+    bucket: rex
+
+keycloak:
+  jwks-url: ${KEYCLOAK_JWKS_URL:https://auth.dev.commodis.de/realms/grant-thornton/protocol/openid-connect/certs}
+
+teamevent:
+  job:
+    enabled: ${TEAMEVENT_JOB_ENABLED:false}
+    cron: ${TEAMEVENT_JOB_CRON:0 0 14 * * *}
+    zone: ${ZONE:Asia/Kolkata}

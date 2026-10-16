@@ -1,0 +1,14 @@
+/** DTO representing the InvoiceTransfersResponseDto data structure received from the D-velop document management webhook. */
+package com.rex.commodis.dto.dvelopDtos;
+
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+import lombok.Data;
+
+import java.util.List;
+
+@Data
+@JsonIgnoreProperties(ignoreUnknown = true)
+public class InvoiceTransfersResponseDto {
+
+    private List<InvoiceTransferDto> transfers;
+}

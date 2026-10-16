@@ -1,0 +1,33 @@
+databaseType = "PostgreSql"
+id = "52a76536-2a0c-4f2f-9d56-afdd3c542090"
+name = "rex-backend-flyway"
+
+[flyway]
+callbackLocations = [ "filesystem:callbacks" ]
+locations = [ "filesystem:migrations" ]
+mixed = true
+outOfOrder = true
+schemaModelLocation = "schema-model"
+validateMigrationNaming = true
+
+[flywayDesktop]
+enableMigrations = true
+developmentEnvironment = "development"
+shadowEnvironment = "shadow"
+
+  [flywayDesktop.generate]
+  undoScripts = false
+
+[redgateCompare]
+filterFile = "filter.rgf"
+
+[redgateCompare.postgresql.options.behavior]
+detectRenames = "identical-only"
+
+[redgateCompare.postgresql.options.ignores]
+ignoreNewlinesInTextObjects = "off"
+
+[environments.RexBackendFlyway]
+url = "jdbc:postgresql://localhost:5432/postgres"
+schemas = [ "public", "rexbase" ]
+displayName = "RexBackendFlyway"

@@ -1,0 +1,29 @@
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: rex-db
+    environment:
+      POSTGRES_DB: app
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5600:5432"
+    volumes:
+      - rex-db-data:/var/lib/postgresql/data
+
+  flyway:
+    image: redgate/flyway:latest
+    depends_on:
+      - db
+    volumes:
+      - ./rex-backend-flyway/rex-backend-flyway/migrations:/flyway/sql
+    command: >
+      -url=jdbc:postgresql://db:5432/app
+      -user=postgres
+      -password=postgres
+      -locations=filesystem:/flyway/sql
+      -connectRetries=60
+      migrate
+
+volumes:
+  rex-db-data:
